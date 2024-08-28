@@ -1,0 +1,101 @@
+---
+name: Create test environment from PR comment
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  execute_script:
+    runs-on: ubuntu-latest
+    environment: DEV
+
+    steps:
+      - name: Check if comment contains 'create testenv' anywhere
+        run: |
+          if ! echo "${{ github.event.comment.body }}" | grep -q "create testenv"; then
+            echo "The comment does not contain 'create testenv'. Exiting..."
+            exit 0
+          fi
+
+      - name: Extract and set branch variable from PR
+        run: |
+          PR_URL="${{ github.event.issue.pull_request.url }}"
+          PR_DATA=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "$PR_URL")
+          BRANCH_NAME=$(echo "$PR_DATA" | jq -r '.head.ref')
+
+          if [ -z "$BRANCH_NAME" ]; then
+            echo "Branch extraction failed. Exiting..."
+            exit 1
+          fi
+
+          echo "branch=$BRANCH_NAME" >> $GITHUB_ENV
+          echo "Extracted branch: $BRANCH_NAME"
+
+      - name: Comment "on going" on the PR and save comment ID
+        id: comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RESPONSE=$(curl -s -X POST -H "Authorization: token $GITHUB_TOKEN" \
+            -d '{"body": "The environment setup is in progress..."}' \
+            ${{ github.event.issue.url }}/comments)
+          COMMENT_ID=$(echo $RESPONSE | jq -r '.id')
+          echo "comment_id=$COMMENT_ID" >> $GITHUB_ENV
+
+      - name: Execute Script on Remote Server
+        if: ${{ env.branch != '' }}
+        timeout-minutes: 15
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.TEST_ENV_SSH_HOST }}
+          username: ${{ secrets.TEST_ENV_SSH_USER }}
+          key: ${{ secrets.TEST_ENV_SSH_KEY }}
+          script: |
+            eval "$(ssh-agent -s)"
+            ssh-add ~/.ssh/actions_keys/actions@assek
+            export TERM=xterm-256color
+            BRANCH=${{ env.branch }}
+            #BRANCH="main.street_required_389"
+            SUDO_PWD=${{ secrets.TEST_ENV_SUDO_PWD }}
+            echo $SUDO_PWD | sudo -S -E /srv/anet_testing/odoo/tools/test_environment/deploy.sh create $BRANCH | tee /tmp/script_output.log
+            wait
+            if [ ! -s /tmp/script_output.log ]; then
+              echo "Warning: script_output.log is empty or does not exist."
+              exit 1
+            fi
+
+      - name: Download log file from Remote Server
+        if: ${{ env.branch != '' }}
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.TEST_ENV_SSH_HOST }}
+          username: ${{ secrets.TEST_ENV_SSH_USER }}
+          key: ${{ secrets.TEST_ENV_SSH_KEY }}
+          source: /tmp/script_output.log
+          target: ./script_output.log
+
+      - name: Extract last 6 lines of output
+        if: ${{ env.branch != '' }}
+        run: |
+          if [ -f script_output.log ]; then
+            tail -n 6 script_output.log > last_lines.txt
+            echo "LAST_LINES=$(cat last_lines.txt)" >> $GITHUB_ENV
+          else
+            echo "No script_output.log found. Setting LAST_LINES to empty."
+            echo "LAST_LINES=" >> $GITHUB_ENV
+          fi
+
+      - name: Update the initial PR comment
+        if: ${{ env.branch != '' }} && success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_ID: ${{ steps.comment.outputs.comment_id }}
+        run: |
+          curl -X PATCH -H "Authorization: token $GITHUB_TOKEN" \
+            -d '{"body": "Action completed successfully. Here are the last 6 lines of output:\n```\n'${LAST_LINES}'\n```"}' \
+            https://api.github.com/repos/${{ github.repository }}/issues/comments/${{ env.COMMENT_ID }}
