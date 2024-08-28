@@ -1,0 +1,47 @@
+---
+name: Create test environment from PR comment
+
+on:
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  execute_script:
+    runs-on: ubuntu-latest
+    environment: DEV
+
+    steps:
+      - name: Check if comment contains "create test env"
+        if: contains(github.event.comment.body, 'create test env')
+        run: echo "Comment contains 'create test env'"
+
+      - name: Extract branch variable from comment
+        if: contains(github.event.comment.body, 'create test env')
+        run: |
+          echo "${{ github.event.comment.body }}" | grep -oP 'brand:\s*\K\w+' > branch.txt
+        id: extract_branch
+
+      - name: Read extracted branch
+        if: steps.extract_brand.outputs.branch
+        run: |
+          branch=$(cat branch.txt)
+          echo "Branch is: $branch"
+        id: read_branch
+
+      - name: Execute Script on Remote Server
+        if: contains(github.event.comment.body, 'create test env')
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.TEST_ENV.SSH_HOST }}
+          username: ${{ secrets.TEST_ENV.SSH_USER }}
+          key: ${{ secrets.TEST_ENV.SSH_KEY }}
+          script: |
+            BRANCH=${{ steps.read_branch.outputs.branch }}
+            HOST=${{ secrets.TEST_ENV.SSH_HOST }}
+            USER=${{ secrets.TEST_ENV.SSH_USER }}
+            KEY=${{ secrets.TEST_ENV.SSH_KEY }}
+            echo "branch: $BRANCH
+              HOST: $HOST
+              USER: $USER
+              KEY: $KEY"
+              #sudo BRANCH=${{ steps.read_branch.outputs.brand }} /path/to/pepe.sh
